@@ -178,7 +178,6 @@ export class CallProcessor {
   }
 
   private isRetryableError(error: any): boolean {
-    // Define which errors should be retried
     const retryableErrors = [
       'VAPI_BUSY',
       'NETWORK_ERROR',

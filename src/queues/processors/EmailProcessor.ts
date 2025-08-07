@@ -24,67 +24,70 @@ export interface EmailJobData {
 export class EmailProcessor {
   async process(job: Job<EmailJobData>): Promise<any> {
     const { type, to, subject, html, text, attachments, filePaths, metadata } = job.data;
-    
-    // try {
-    //   console.log(`📧 Processing ${type} email job ${job.id}`);
 
-    //   // Prepare attachments from file paths if provided
-    //   let emailAttachments = attachments || [];
+    try {
+      console.log(`📧 Processing ${type} email job ${job.id}`);
+
+      // Prepare attachments from file paths if provided
+      let emailAttachments = attachments || [];
+
+      if (filePaths && filePaths.length > 0) {
+        const fileAttachments = filePaths.map(filePath => {
+          if (!fs.existsSync(filePath)) {
+            throw new Error(`File not found: ${filePath}`);
+          }
+
+          return {
+            filename: path.basename(filePath),
+            content: fs.readFileSync(filePath).toString("base64"),
+            contentType: this.getContentType(filePath) 
+          };
+        });
+
+        emailAttachments = [...emailAttachments, ...fileAttachments];
+      }
+
+      // Send email using Resend
+      await resend.emails.send({
+        from: "GlobalTFN Bot <noreply@mail.globaltfn.tech>",
+        to,
+        subject,
+        html,
+        text,
+        attachments: emailAttachments.length > 0 ? emailAttachments : undefined,
+      } as any)
+
+      if (Error) {
+        console.error(`❌ Resend error for job ${job.id}:`, Error);
+        throw new Error(`Email sending failed: ${Error || 'Unknown error'}`);
+      }
+
+      // Clean up files after successful email if they were temporary
+      if (filePaths) {
+        this.cleanupFiles(filePaths, metadata?.cleanup !== false);
+      }
+
+      console.log(`✅ Email sent successfully - ID: ${data?.id}`);
+
+      return {
+        status: 'completed',
+        emailId: data?.id,
+        sentAt: new Date().toISOString()
+      };
+
+
       
-    //   if (filePaths && filePaths.length > 0) {
-    //     const fileAttachments = filePaths.map(filePath => {
-    //       if (!fs.existsSync(filePath)) {
-    //         throw new Error(`File not found: ${filePath}`);
-    //       }
-          
-    //       return {
-    //         filename: path.basename(filePath),
-    //         content: fs.readFileSync(filePath).toString("base64"),
-    //         contentType: this.getContentType(filePath)
-    //       };
-    //     });
-        
-    //     emailAttachments = [...emailAttachments, ...fileAttachments];
-    //   }
 
-    //   // Send email using Resend
-    //   const { data, error } = await resend.emails.send({
-    //     from: "GlobalTFN Bot <noreply@mail.globaltfn.tech>",
-    //     to,
-    //     subject,
-    //     html: html || text,
-    //     text: text,
-    //     attachments: emailAttachments.length > 0 ? emailAttachments : undefined,
-    //   });
+    } catch (error: any) {
+      console.error(`❌ Email job ${job.id} failed:`, error.message);
 
-    //   if (error) {
-    //     console.error(`❌ Resend error for job ${job.id}:`, error);
-    //     throw new Error(`Email sending failed: ${error.message || 'Unknown error'}`);
-    //   }
+      // Clean up files even on failure if they were temporary
+      if (job.data.filePaths && job.data.metadata?.cleanup !== false) {
+        this.cleanupFiles(job.data.filePaths, true);
+      }
 
-    //   // Clean up files after successful email if they were temporary
-    //   if (filePaths) {
-    //     this.cleanupFiles(filePaths, metadata?.cleanup !== false);
-    //   }
-
-    //   console.log(`✅ Email sent successfully - ID: ${data?.id}`);
-      
-    //   return {
-    //     status: 'completed',
-    //     emailId: data?.id,
-    //     sentAt: new Date().toISOString()
-    //   };
-
-    // } catch (error: any) {
-    //   console.error(`❌ Email job ${job.id} failed:`, error.message);
-      
-    //   // Clean up files even on failure if they were temporary
-    //   if (job.data.filePaths && job.data.metadata?.cleanup !== false) {
-    //     this.cleanupFiles(job.data.filePaths, true);
-    //   }
-      
-    //   throw error;
-    // }
+      throw error;
+    }
   }
 
   private getContentType(filePath: string): string {
@@ -98,13 +101,13 @@ export class EmailProcessor {
       '.json': 'application/json',
       '.zip': 'application/zip'
     };
-    
+
     return contentTypes[ext] || 'application/octet-stream';
   }
 
   private cleanupFiles(filePaths: string[], shouldCleanup: boolean = true) {
     if (!shouldCleanup) return;
-    
+
     filePaths.forEach(filePath => {
       try {
         if (fs.existsSync(filePath)) {
@@ -127,7 +130,7 @@ export class EmailProcessor {
         }
       }
     } catch (error) {
-      
+
     }
   }
 }
