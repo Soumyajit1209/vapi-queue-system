@@ -18,10 +18,12 @@
 	"dependencies": {
 		"axios": "^1.9.0",
 		"body-parser": "^2.2.0",
+		"bullmq": "^5.56.9",
 		"cors": "^2.8.5",
 		"dayjs": "^1.11.13",
 		"dotenv": "^16.5.0",
 		"express": "^5.1.0",
+		"ioredis": "^5.7.0",
 		"json-as-xlsx": "^2.5.6",
 		"mongoose": "^8.14.2",
 		"resend": "^4.6.0"

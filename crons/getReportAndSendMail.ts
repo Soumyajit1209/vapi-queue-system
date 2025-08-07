@@ -1,16 +1,12 @@
+
 import mongoose from "mongoose";
 import dotenv from "dotenv";
-import path from "path";
-import fs from "fs"
 import { connectDB } from "../src/connectDB";
-import xlsx from "json-as-xlsx";
-import dayjs from "dayjs";
-import { Resend } from 'resend';
 import CallData from "../src/models/callData.model";
+import { QueueManager } from "../src/queues/QueueManager";
+import { generateAdvancedReport, generateSummaryStats } from "../src/reportGenerator";
 
 dotenv.config();
-
-const resend = new Resend(process.env.RESEND_API_KEY);
 
 const EMAIL_TO: string[] = process.env.EMAIL_TO?.split(',').map(email => email.trim()) as string[];
 
@@ -65,109 +61,6 @@ async function fetchTodayFullCallData() {
     return users || [];
 }
 
-function saveToXLSX(calls: any[], label: string = "AllCalls"): string {
-    if (!calls.length) throw new Error("No calls to export.");
-
-    const data = [
-        {
-            sheet: "Filtered Calls",
-            columns: [
-                { label: "Phone Number", value: "phoneNumber" },
-                { label: "Customer Name", value: "customerName" },
-                { label: "Customer Number", value: "customerNumber" },
-                { label: "Duration", value: "duration" },
-                { label: "Call Type", value: "callType" },
-                { label: "Cost", value: "cost" },
-                { label: "Assistant", value: "assistant" },
-                { label: "Started At", value: "startedAt" },
-                { label: "Ended Reason", value: "endedReason" },
-                { label: "Success Evaluation", value: "successEvaluation" },
-                { label: "Recording URL", value: "recordingUrl" },
-                { label: "Analysis Summary", value: "analysisSummary" },
-                { label: "Transcript", value: "transcript" },
-            ],
-            content: calls.map((call: any) => ({
-                customerNumber: call.customer?.number || "Unknown",
-                customerName: call.customer?.name || "Unknown",
-                phoneNumber: call.call?.phoneNumber?.twilioPhoneNumber ?? "N/A",
-                callType: call.call?.type ?? "N/A",
-                successEvaluation: call.analysis?.successEvaluation ?? "N/A",
-                cost: call.cost,
-                duration: call.durationSeconds
-                    ? `${Math.floor(call.durationSeconds / 60)}m ${(call.durationSeconds % 60).toFixed(2)}s`
-                    : "0s",
-                assistant: call.assistant?.name || "N/A",
-                startedAt: call.startedAt
-                    ? new Date(call.startedAt).toLocaleString()
-                    : "N/A",
-                endedReason: call.endedReason || "N/A",
-                recordingUrl: call.recordingUrl || "N/A",
-                analysisSummary: call.summary || "N/A",
-                transcript: call.transcript || "N/A",
-            })),
-        },
-    ];
-
-    const fileName = `${label}_${dayjs().format("YYYY-MM-DD_HH-mm-ss")}`;
-    const uploadFolder = process.cwd() + "/uploads"
-    // Make sure uploads folder exists
-    if (!fs.existsSync(uploadFolder)) {
-        fs.mkdirSync(uploadFolder, { recursive: true });
-        console.log(`📁 Created uploads folder at ${uploadFolder}`);
-    }
-    const filePath = path.join(uploadFolder, fileName);
-
-    xlsx(data, {
-        fileName: filePath,
-        writeMode: "writeFile",
-    });
-
-    console.log(`✅ XLSX "${label}" saved to`, filePath);
-    return filePath + ".xlsx";
-}
-
-function cleanUploadsFolder() {
-    const uploadDir = path.join(process.cwd(), 'uploads');
-
-    if (fs.existsSync(uploadDir)) {
-        const files = fs.readdirSync(uploadDir);
-        for (const file of files) {
-            fs.unlinkSync(path.join(uploadDir, file));
-        }
-        fs.rmdirSync(uploadDir);
-    }
-}
-
-
-async function sendEmailWithAttachment(filePaths: string[]) {
-    const attachments = filePaths.map(filePath => ({
-        filename: path.basename(filePath),
-        content: fs.readFileSync(filePath).toString("base64"),
-    }));
-
-    try {
-        const { data, error } = await resend.emails.send({
-            from: "GlobalTFN Bot <noreply@mail.globaltfn.tech>",
-            to: EMAIL_TO,
-            subject: "Last 24 Hour Call Reports",
-            html: `<p>📞 Here are the latest call reports.</p>`,
-            attachments: attachments.map(file => ({
-                filename: file.filename,
-                content: file.content,
-                contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            })),
-        });
-
-        if (error) {
-            console.error("❌ Resend error:", error);
-        } else {
-            console.log(`📧 Email sent via Resend: ${data?.id}`);
-        }
-    } catch (err) {
-        console.error("❌ Error sending with Resend:", err);
-    }
-}
-
 async function main() {
     try {
         await connectDB();
@@ -176,39 +69,189 @@ async function main() {
 
         if (!data?.length) {
             console.log("No calls found for the date range.");
+            
+            // Still send an email notification about no calls
+            const queueManager = QueueManager.getInstance();
+            await queueManager.addEmailJob({
+                type: 'daily_report',
+                to: EMAIL_TO,
+                subject: `Daily Call Report - ${new Date().toLocaleDateString()} - No Calls`,
+                html: `
+                    <h2>📞 Daily Call Report</h2>
+                    <p>Date: ${new Date().toLocaleDateString()}</p>
+                    <p><strong>No calls were made in the last 24 hours.</strong></p>
+                    <p>This could be normal if it's outside business hours or a weekend.</p>
+                `,
+                metadata: { cleanup: false }
+            });
+            
             return;
         }
 
-        // Save all calls
-        const allCallsPath = saveToXLSX(data, "AllCalls");
+        // Generate comprehensive statistics
+        const stats = generateSummaryStats(data);
 
-        // Filter successful calls
+        // Generate advanced report with multiple sheets
+        const advancedReportPath = generateAdvancedReport(data, "DailyReport_Comprehensive");
+
+        // Filter successful calls for separate report
         const successfulCalls = data.filter((call: any) =>
             call.analysis?.successEvaluation === true &&
             call.durationSeconds > 10 &&
             call.endedReason?.toLowerCase() !== "voicemail"
         );
 
-        let successfulCallsPath = "";
-        if (successfulCalls.length) {
-            successfulCallsPath = saveToXLSX(successfulCalls, "SuccessfulCalls");
-        } else {
-            console.log("⚠️ No successful filtered calls.");
+        const filePaths = [advancedReportPath];
+
+        // Generate successful calls report if there are any
+        if (successfulCalls.length > 0) {
+            const successfulReportPath = generateAdvancedReport(successfulCalls, "DailyReport_SuccessfulCalls");
+            filePaths.push(successfulReportPath);
         }
 
-        // Send both files via email
-        const filesToSend = [allCallsPath];
-        if (successfulCallsPath) filesToSend.push(successfulCallsPath);
+        // Generate detailed HTML email content
+        const emailHtml = generateEmailContent(stats, data.length, successfulCalls.length);
 
-        await sendEmailWithAttachment(filesToSend);
+        // Queue email job using BullMQ
+        const queueManager = QueueManager.getInstance();
+        await queueManager.addEmailJob({
+            type: 'daily_report',
+            to: EMAIL_TO,
+            subject: `📞 Daily Call Report - ${new Date().toLocaleDateString()} (${stats.successRate}% Success Rate)`,
+            html: emailHtml,
+            filePaths: filePaths,
+            metadata: { 
+                cleanup: true, // Clean up files after sending
+                reportDate: new Date().toLocaleDateString(),
+                totalCalls: data.length,
+                successfulCalls: successfulCalls.length
+            }
+        });
 
-        cleanUploadsFolder()
+        console.log(`✅ Daily report queued successfully - ${data.length} calls processed`);
 
     } catch (err) {
-        console.error("❌ Error:", err);
+        console.error("❌ Error generating daily report:", err);
+        
+        // Send error notification
+        try {
+            const queueManager = QueueManager.getInstance();
+            await queueManager.addEmailJob({
+                type: 'alert',
+                to: EMAIL_TO,
+                subject: '🚨 Daily Report Generation Failed',
+                html: `
+                    <h2>🚨 Daily Report Generation Error</h2>
+                    <p>The daily call report generation failed with the following error:</p>
+                    <pre style="background-color: #f5f5f5; padding: 10px; border-radius: 5px;">
+                        ${err instanceof Error ? err.message : String(err)}
+                    </pre>
+                    <p>Timestamp: ${new Date().toISOString()}</p>
+                    <p>Please check the application logs for more details.</p>
+                `,
+                metadata: { cleanup: false }
+            });
+        } catch (emailError) {
+            console.error("❌ Failed to send error notification:", emailError);
+        }
     } finally {
         await mongoose.disconnect();
     }
 }
 
-main();
+function generateEmailContent(stats: any, totalCalls: number, successfulCalls: number): string {
+    const successRate = totalCalls > 0 ? ((successfulCalls / totalCalls) * 100).toFixed(1) : '0';
+    
+    return `
+        <div style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px;">
+            <h1 style="color: #333; text-align: center; border-bottom: 3px solid #4CAF50; padding-bottom: 10px;">
+                📞 Daily Call Report
+            </h1>
+            
+            <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                <h2 style="color: #495057; margin-top: 0;">📊 Summary Statistics</h2>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                    <div style="background: white; padding: 15px; border-radius: 6px; border-left: 4px solid #007bff;">
+                        <h3 style="margin: 0; color: #007bff;">Total Calls</h3>
+                        <p style="font-size: 24px; font-weight: bold; margin: 5px 0 0 0;">${stats.totalCalls}</p>
+                    </div>
+                    <div style="background: white; padding: 15px; border-radius: 6px; border-left: 4px solid #28a745;">
+                        <h3 style="margin: 0; color: #28a745;">Successful Calls</h3>
+                        <p style="font-size: 24px; font-weight: bold; margin: 5px 0 0 0;">${stats.successfulCalls}</p>
+                    </div>
+                    <div style="background: white; padding: 15px; border-radius: 6px; border-left: 4px solid #17a2b8;">
+                        <h3 style="margin: 0; color: #17a2b8;">Success Rate</h3>
+                        <p style="font-size: 24px; font-weight: bold; margin: 5px 0 0 0;">${stats.successRate}%</p>
+                    </div>
+                    <div style="background: white; padding: 15px; border-radius: 6px; border-left: 4px solid #ffc107;">
+                        <h3 style="margin: 0; color: #ffc107;">Total Cost</h3>
+                        <p style="font-size: 24px; font-weight: bold; margin: 5px 0 0 0;">${stats.totalCost}</p>
+                    </div>
+                </div>
+            </div>
+
+            <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                <h2 style="color: #495057; margin-top: 0;">⏱️ Duration & Performance</h2>
+                <ul style="list-style: none; padding: 0;">
+                    <li style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">
+                        <strong>Total Talk Time:</strong> ${stats.totalDuration}
+                    </li>
+                    <li style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">
+                        <strong>Average Call Duration:</strong> ${stats.avgDuration}
+                    </li>
+                    <li style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">
+                        <strong>Average Cost per Call:</strong> ${stats.avgCost}
+                    </li>
+                </ul>
+            </div>
+
+            <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                <h2 style="color: #495057; margin-top: 0;">📊 Call Outcomes</h2>
+                <div style="margin: 15px 0;">
+                    ${Object.entries(stats.endReasonBreakdown).map(([reason, count]) => `
+                        <div style="margin: 8px 0; padding: 8px; background: white; border-radius: 4px;">
+                            <span style="font-weight: bold;">${reason}:</span> 
+                            <span>${count} calls (${((count as number / totalCalls) * 100).toFixed(1)}%)</span>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+
+            ${Object.keys(stats.assistantBreakdown).length > 1 ? `
+            <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                <h2 style="color: #495057; margin-top: 0;">🤖 Assistant Performance</h2>
+                <div style="margin: 15px 0;">
+                    ${Object.entries(stats.assistantBreakdown).map(([assistant, count]) => `
+                        <div style="margin: 8px 0; padding: 8px; background: white; border-radius: 4px;">
+                            <span style="font-weight: bold;">${assistant}:</span> 
+                            <span>${count} calls</span>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+            ` : ''}
+
+            <div style="background-color: #e9ecef; padding: 15px; border-radius: 8px; margin: 20px 0;">
+                <h3 style="color: #495057; margin-top: 0;">📎 Attached Reports</h3>
+                <ul>
+                    <li>📈 Comprehensive Daily Report (Multiple sheets with detailed analytics)</li>
+                    ${successfulCalls > 0 ? '<li>✅ Successful Calls Report (Filtered successful calls only)</li>' : ''}
+                </ul>
+            </div>
+
+            <div style="text-align: center; margin-top: 30px; padding: 20px; border-top: 1px solid #dee2e6;">
+                <p style="color: #6c757d; margin: 0;">
+                    Report generated on ${new Date().toLocaleString()}
+                </p>
+                <p style="color: #6c757d; margin: 5px 0 0 0; font-size: 14px;">
+                    Powered by azmth Call Management System
+                </p>
+            </div>
+        </div>
+    `;
+}
+
+// Run if called directly
+if (require.main === module) {
+    main();
+}
