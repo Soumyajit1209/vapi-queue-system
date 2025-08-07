@@ -4,7 +4,14 @@
 	"private": true,
 	"scripts": {
 		"start": "bun run index.ts",
-		"sendemail": "bun run crons/getReportAndSendMail.ts"
+		"dev": "bun --watch index.ts",
+		"sendemail": "bun run crons/getReportAndSendMail.ts",
+		"queue:dashboard": "bun run src/admin/queue-dashboard.ts",
+		"queue:clear": "bun run src/admin/clear-queues.ts",
+		"test": "bun test",
+		"build": "bun build index.ts --outdir ./dist",
+		"lint": "eslint src/**/*.ts",
+		"type-check": "tsc --noEmit"
 	},
 	"devDependencies": {
 		"@types/body-parser": "^1.19.5",
